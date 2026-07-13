@@ -26,8 +26,10 @@ copyright = "2026, NVIDIA Corporation"
 author = "NVIDIA"
 
 _version_file = _repo_root / "VERSION.md"
-version = _version_file.read_text().strip() if _version_file.exists() else "0.0.0"
+_default_version = _version_file.read_text().strip() if _version_file.exists() else "0.0.0"
+version = os.environ.get("DOCS_VERSION", _default_version).strip() or _default_version
 release = version
+_display_version = os.environ.get("DOCS_VERSION_LABEL", "").strip()
 
 # -- General configuration ---------------------------------------------------
 
@@ -114,7 +116,11 @@ if _switcher_url:
         "navbar-icon-links",
     ]
 
-html_title = f"{project} v{version}"
+html_title = (
+    f"{project} {_display_version}"
+    if _display_version
+    else f"{project} v{version}"
+)
 
 html_static_path = ["_static"]
 html_css_files = ["tags.css"]

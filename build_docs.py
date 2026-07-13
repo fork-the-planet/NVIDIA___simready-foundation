@@ -4,6 +4,10 @@
 
 Usage:
     python build_docs.py [--strict] [--verbose]
+
+Versioned deploys resolve refs with ``scripts/docs_version_refs.py`` and set
+``DOCS_VERSION`` for Sphinx (``conf.py``). Release branches map to dotted
+versions; preview branches keep the branch name.
 """
 
 import argparse

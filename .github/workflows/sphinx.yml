@@ -2,12 +2,20 @@ name: Build and Deploy Docs
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - release_*
+      - release-*
+      - preview_*
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       version_tag:
         description: "Git tag to build docs from (e.g. v0.2.0). Leave blank to build from HEAD."
+        required: false
+        type: string
+      branch_ref:
+        description: "Branch to build docs from (e.g. release_2026-04-1 or preview_my-feature)."
         required: false
         type: string
 
@@ -22,7 +30,8 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.version_tag || github.ref }}
+          ref: ${{ inputs.branch_ref || inputs.version_tag || github.ref }}
+          fetch-depth: 0
           submodules: recursive
           lfs: true
 
@@ -36,26 +45,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-docs.txt
 
+      - name: Ensure docs version helper
+        run: |
+          if [[ ! -f scripts/docs_version_refs.py ]]; then
+            mkdir -p scripts
+            git show origin/main:scripts/docs_version_refs.py > scripts/docs_version_refs.py
+          fi
+
+      - name: Fetch release and preview branches
+        run: python scripts/docs_version_refs.py fetch
+
       - name: Determine version
         id: version
         run: |
           TAG_INPUT="${{ inputs.version_tag }}"
-          if [[ -n "$TAG_INPUT" ]]; then
-            VER="${TAG_INPUT#v}"
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VER="${GITHUB_REF#refs/tags/v}"
-          else
-            VER="$(cat VERSION.md | tr -d '[:space:]')"
-          fi
-          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          BRANCH_INPUT="${{ inputs.branch_ref }}"
+          SOURCE_REF="${{ github.ref }}"
 
-          # Only update /latest/ on pushes to main (not tag or manual builds)
-          if [[ "$GITHUB_REF" == refs/heads/main && -z "$TAG_INPUT" ]]; then
+          if [[ -n "$BRANCH_INPUT" ]]; then
+            SOURCE_REF="refs/heads/$BRANCH_INPUT"
+          elif [[ -n "$TAG_INPUT" ]]; then
+            SOURCE_REF="refs/tags/$TAG_INPUT"
+          fi
+
+          VER="$(python scripts/docs_version_refs.py version "$SOURCE_REF")"
+          LABEL="$(python scripts/docs_version_refs.py label "$VER")"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
+
+          # Only update /latest/ on pushes to main (not tag, branch, or manual builds)
+          if [[ "$SOURCE_REF" == refs/heads/main && -z "$TAG_INPUT" && -z "$BRANCH_INPUT" ]]; then
             echo "update_latest=true" >> "$GITHUB_OUTPUT"
           else
             echo "update_latest=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "Building docs version: $VER"
+          echo "Building docs version: $VER from $SOURCE_REF"
 
       - name: Get Pages URL
         id: pages
@@ -73,6 +98,8 @@ jobs:
 
       - name: Build docs
         env:
+          DOCS_VERSION: ${{ steps.version.outputs.ver }}
+          DOCS_VERSION_LABEL: ${{ steps.version.outputs.label }}
           DOCS_BASE_URL: "${{ steps.pages.outputs.url }}/${{ steps.version.outputs.ver }}/"
           DOCS_VERSIONS_JSON: "${{ steps.pages.outputs.url }}/versions.json"
         run: python build_docs.py
@@ -80,6 +107,7 @@ jobs:
       - name: Deploy versioned docs to gh-pages
         env:
           VERSION: ${{ steps.version.outputs.ver }}
+          SOURCE_REF: ${{ steps.version.outputs.source_ref }}
           UPDATE_LATEST: ${{ steps.version.outputs.update_latest }}
           PAGES_URL: ${{ steps.pages.outputs.url }}
         run: |
@@ -106,6 +134,14 @@ jobs:
           rm -rf _static _sources _images _downloads _sphinx_design_static \
                  _doctrees capabilities features guides indexes profiles
 
+          # Drop preview branch folders superseded by mapped slug dirs
+          while IFS= read -r stale; do
+            [[ -n "$stale" ]] && rm -rf "$stale"
+          done < <(python "$GITHUB_WORKSPACE/scripts/docs_version_refs.py" stale-dirs "$SOURCE_REF")
+          while IFS= read -r stale; do
+            [[ -n "$stale" ]] && rm -rf "$stale"
+          done < <(python "$GITHUB_WORKSPACE/scripts/docs_version_refs.py" cleanup-previews "$DEPLOY_DIR")
+
           # Place build into versioned subdirectory
           rm -rf "$VERSION"
           cp -r "$GITHUB_WORKSPACE/$DOCS_BUILD" "$VERSION"
@@ -117,16 +153,14 @@ jobs:
           fi
 
           # Generate versions.json for the in-docs version switcher dropdown
-          LATEST_VER=$(ls -d */ 2>/dev/null | grep -v '^latest/$' | sort -rV | head -1 | tr -d '/')
           echo '[' > versions.json
           first=true
           for d in $(ls -d */ 2>/dev/null | grep -v '^latest/$' | sort -rV); do
             v="${d%/}"
-            if [[ "$first" == "true" ]]; then
+            label="$(python "$GITHUB_WORKSPACE/scripts/docs_version_refs.py" label "$v")"
+            if [[ "$first" == "true" && "$label" == "$v" ]]; then
               label="$v (latest)"
               first=false
-            else
-              label="$v"
             fi
             echo '  {"name": "'"$label"'", "version": "'"$v"'", "url": "'"$PAGES_URL"'/'"$v"'/"},' >> versions.json
           done
@@ -153,7 +187,8 @@ jobs:
             echo '  <li><a href="latest/">latest</a></li>'
             for d in $(ls -d */ 2>/dev/null | grep -v '^latest/$' | sort -rV); do
               v="${d%/}"
-              echo "  <li><a href=\"$v/\">$v</a></li>"
+              label="$(python "$GITHUB_WORKSPACE/scripts/docs_version_refs.py" label "$v")"
+              echo "  <li><a href=\"$v/\">$label</a></li>"
             done
             echo '</ul></body></html>'
           } > index.html
